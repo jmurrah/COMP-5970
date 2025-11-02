@@ -458,3 +458,125 @@ __all__ = [
     "compute_disparity_and_depth",
     "run_sfm",
 ]
+
+
+
+
+####
+import importlib
+import matplotlib.pyplot as plt
+import numpy as np
+
+import assignment3.camera_intrinsics as cam
+from pathlib import Path
+
+# If you tweak camera_intrinsics.py while the notebook is open, rerun this cell
+importlib.reload(cam)
+
+# Point this directory at your chessboard photos (leave empty to use cached/fallback K)
+CALIBRATION_DIR = Path("assignment3/calibration")
+CALIBRATION_IMAGES = sorted(CALIBRATION_DIR.glob("*.jpg"))
+
+# Fall back to an FOV guess if no calibration data exists
+intrinsics_bundle = cam.load_intrinsics(
+    calibration_images=CALIBRATION_IMAGES if CALIBRATION_IMAGES else None,
+    fallback_shape=left_img.shape[:2],  # from the earlier image-loading cell
+)
+
+PHONE_K = intrinsics_bundle.camera_matrix
+PHONE_DIST = intrinsics_bundle.dist_coeffs
+
+print("Active camera matrix:\n", PHONE_K)
+print("Distortion coefficients:", PHONE_DIST.ravel())
+
+# Keep copies of the original RGB images if you still need them elsewhere
+left_gray, right_gray = cam.preprocess_stereo_pair(
+    left_img,              # from your existing loading cell
+    right_img,
+    intrinsics=PHONE_K,
+    dist_coeffs=PHONE_DIST,
+)
+
+kp1, kp2, matches, matches_vis = cam.match_stereo_keypoints(left_gray, right_gray)
+plt.figure(figsize=(12, 6))
+plt.imshow(matches_vis, cmap="gray")
+plt.title("ORB Matches (undistorted)")
+plt.axis("off")
+plt.show()
+
+pts1, pts2, F, E = cam.estimate_fundamental_and_essential(
+    kp1, kp2, matches, camera_matrix=PHONE_K, dist_coeffs=PHONE_DIST
+)
+print(f"Inliers kept: {len(pts1)}")
+
+disparity_map, depth_map = cam.compute_disparity_and_depth(
+    left_gray,
+    right_gray,
+    camera_matrix=PHONE_K,
+    baseline_m=cam.DEFAULT_BASELINE_METERS,
+)
+
+plt.figure(figsize=(10, 4))
+plt.imshow(disparity_map, cmap="plasma")
+plt.title("Disparity (pixels)")
+plt.axis("off")
+plt.show()
+
+if depth_map is not None:
+    plt.figure(figsize=(10, 4))
+    plt.imshow(depth_map, cmap="viridis")
+    plt.title("Depth (meters)")
+    plt.axis("off")
+    plt.colorbar(label="m")
+    plt.show()
+
+sfm_images = [
+    cam.preprocess_stereo_pair(img, img, intrinsics=PHONE_K, dist_coeffs=PHONE_DIST)[0]
+    for img in [
+        angle1_img,
+        angle2_img,
+        angle3_img,
+        angle4_img,
+        angle5_img,
+    ]
+]
+
+trajectory_calibrated, structure_calibrated = cam.run_sfm(
+    sfm_images,
+    intrinsics=PHONE_K,
+    dist_coeffs=PHONE_DIST,
+    visualize_epipolar=True,  # flip to False if you want a faster run
+)
+
+cam.visualize_trajectory(trajectory_calibrated)
+cam.visualize_structure(structure_calibrated)
+
+# Example: scale focal lengths by ±10% to gauge robustness
+K_perturbed = cam.make_scaled_intrinsics(PHONE_K, fx_scale=1.1, fy_scale=0.9)
+
+trajectory_perturbed, structure_perturbed = cam.run_sfm(
+    sfm_images,
+    intrinsics=K_perturbed,
+    dist_coeffs=PHONE_DIST,
+    visualize_epipolar=False,
+)
+
+def summarize_trajectory(trajectory):
+    centers = np.array([pose[:3, 3] for pose in trajectory])
+    span = centers.ptp(axis=0)
+    return dict(
+        frames=len(trajectory),
+        span_x=float(span[0]),
+        span_y=float(span[1]),
+        span_z=float(span[2]),
+    )
+
+def summarize_structure(structure):
+    if not structure:
+        return {"points": 0}
+    points = np.vstack(structure)
+    return {
+        "points": int(points.shape[0]),
+        "min_z": float(np.nanmin(points[:, 2])),
+        "max_z": float(np.nanmax(points[:, 2])),
+    }
